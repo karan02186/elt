@@ -1,0 +1,5 @@
+config/sqlserver-gcp-bigquery.cfg
+config/sqlserver-aws-snowflake.cfg
+config/sqlserver-gcp-snowflake.cfg
+config/sqlserver-aws-databricks.cfg
+/metadata/sqlscripts

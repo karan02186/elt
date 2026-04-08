@@ -1,0 +1,8 @@
+SNOWFLAKE,DATABRICKS,SQLSERVER,TERADATA
+number,int,int,I
+number,smallint,smallint,SI
+number,int,tinyint,TI
+varchar,string,varchar,CV
+float,float,decimal,D
+date,date,date,DA
+timestampntz,timestamp,datetime,TS

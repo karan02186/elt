@@ -1,0 +1,2 @@
+ID,SRC_DB_TYPE,DATABASE_NAME,SCHEMA_NAME,OBJ_TYPE,SRC_TBL_NAME,PRIMARY_KEY_COL,COL_NAMES,TRG_TBL_NAME,INCR_LOGIC_COL_NAME
+1,sqlserver,bikestores,production,table,table_booking,booking_id,*,table_booking,,,
