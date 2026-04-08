@@ -2,6 +2,9 @@ import os
 import configparser
 from google.cloud import bigquery
 from datetime import datetime
+import logging
+
+logger = logging.getLogger("data_accelerator")
 
 
 # -----------------------------
@@ -18,11 +21,11 @@ def read_config(config_path):
         if not files:
             raise Exception(f"Config file not found: {config_path}")
 
-        print("Reading config from:", config_path)
+        logger.info(f"Reading config from: {config_path}")
         return config
 
     except Exception as e:
-        print("Error reading config:", str(e))
+        logger.exception(f"Error reading config: {e}")
         raise
 
 
@@ -41,7 +44,7 @@ def bigquery_connection(cfg):
         return client
 
     except Exception as e:
-        print("Error creating BigQuery connection:", str(e))
+        logger.exception(f"Error creating BigQuery connection: {e}")
         raise
 
 
@@ -53,9 +56,9 @@ def build_gcs_path(bucket_name, dataset, schema, table):
     Builds GCS path for incremental files.
     """
     try:
-        return f"gs://{bucket_name}/data/{dataset.lower()}/{schema.lower()}/{table.lower()}/incremental/*"
+        return f"gs://{bucket_name}/data/{dataset}/{schema}/{table}/incremental/*"
     except Exception as e:
-        print("Error building GCS path:", str(e))
+        logger.exception(f"Error building GCS path: {e}")
         raise
 
 
@@ -78,14 +81,14 @@ def get_columns(client, project, dataset, table):
         query_job = client.query(query)
 
         # Exclude RAW metadata columns
-        exclude = ['soft_delete', 'load_ts', 'row_hash', 'file_name',
-                   'SOFT_DELETE', 'LOAD_TS', 'ROW_HASH', 'FILE_NAME']
+        exclude = ['soft_delete', 'load_ts', 'hash_val', 'file_name',
+                   'SOFT_DELETE', 'LOAD_TS', 'HASH_VAL', 'FILE_NAME']
         cols = [row.column_name for row in query_job if row.column_name not in exclude]
 
         return cols
 
     except Exception as e:
-        print("Error retrieving columns:", str(e))
+        logger.exception(f"Error retrieving columns: {e}")
         raise
 
 
@@ -119,7 +122,7 @@ USING (
         SELECT *,
                ROW_NUMBER() OVER(
                    PARTITION BY {", ".join(primary_keys)}
-                   ORDER BY {", ".join(primary_keys)}
+                   ORDER BY load_ts DESC
                ) rn
         FROM `{staging_table}`
     )
@@ -146,7 +149,7 @@ WHEN NOT MATCHED AND s.soft_delete = 0 THEN
         return merge_sql
 
     except Exception as e:
-        print("Error generating merge SQL:", str(e))
+        logger.exception(f"Error generating merge SQL: {e}")
         raise
 
 
@@ -160,10 +163,10 @@ def truncate_raw_table(client, table_id):
     try:
         sql = f"TRUNCATE TABLE `{table_id}`"
         client.query(sql).result()
-        print("RAW table truncated")
+        logger.info("RAW table truncated")
 
     except Exception as e:
-        print("Error truncating RAW table:", str(e))
+        logger.exception(f"Error truncating RAW table: {e}")
         raise
 
 
@@ -179,7 +182,7 @@ def get_table_schema(client, table_id):
         return table.schema
 
     except Exception as e:
-        print("Error fetching table schema:", str(e))
+        logger.exception(f"Error fetching table schema: {e}")
         raise
 
 
@@ -202,13 +205,12 @@ def load_to_bigquery(cfg, dataset, schema, table, primary_keys):
         project = cfg["bigquery"]["project"]
         bucket = cfg["bigquery"]["bucket_name"]
 
-        raw_table = f"{project}.{dataset.lower()}_raw.{table.lower()}"
-        tgt_table = f"{project}.{dataset.lower()}_tgt.{table.lower()}"
+        raw_table = f"{project}.{dataset}_raw.{table}"
+        tgt_table = f"{project}.{dataset}_tgt.{table}"
 
         gcs_path = build_gcs_path(bucket, dataset, schema, table)
 
-        print("Starting Load Process")
-        print("GCS Path:", gcs_path)
+        logger.info(f"[BigQuery] Starting load process | path='{gcs_path}'")
 
         # Get RAW table schema to enforce schema load
         schema = get_table_schema(client, raw_table)
@@ -221,24 +223,29 @@ def load_to_bigquery(cfg, dataset, schema, table, primary_keys):
         )
 
         # Load Parquet files into RAW
-        print(f"Loading data into RAW table: {raw_table}")
+        logger.info(f"[BigQuery] Loading into RAW table: {raw_table}")
         load_job = client.load_table_from_uri(
             gcs_path,
             raw_table,
             job_config=job_config
         )
         load_job.result()
-        print("COPY INTO RAW Completed")
+        copied_rows = int(load_job.output_rows or 0)
+        logger.info(f"[BigQuery] RAW load completed | rows={copied_rows}")
+
+        if copied_rows == 0:
+            logger.warning(
+                f"[BigQuery] No rows loaded into RAW for {dataset}.{schema}.{table}. Skipping MERGE."
+            )
+            return
 
         # Get business columns
-        columns = get_columns(client, project, f"{dataset.lower()}_raw", table.lower())
+        columns = get_columns(client, project, f"{dataset}_raw", table)
 
         # Generate merge SQL
         merge_sql = generate_merge_sql(tgt_table, raw_table, primary_keys, columns)
-        print(merge_sql)
-
         # Execute merge
-        print("Running MERGE into TARGET")
+        logger.info(f"[BigQuery] Running MERGE into TARGET: {tgt_table}")
         client.query(merge_sql).result()
 
         # Truncate RAW after merge
@@ -246,11 +253,10 @@ def load_to_bigquery(cfg, dataset, schema, table, primary_keys):
 
         end_time = datetime.now()
 
-        print("MERGE Completed")
-        print("Pipeline Completed Successfully")
-        print("Start Time:", start_time)
-        print("End Time:", end_time)
+        logger.info(
+            f"[BigQuery] Pipeline completed successfully | start={start_time} | end={end_time}"
+        )
 
     except Exception as e:
-        print("Pipeline failed:", str(e))
+        logger.exception(f"[BigQuery] Pipeline failed: {e}")
         raise

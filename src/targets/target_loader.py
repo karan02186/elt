@@ -1,6 +1,9 @@
 from elt.src.targets.snowflake_loader import load_to_snowflake
 from elt.src.targets.databricks_loader import load_to_databricks
 from elt.src.targets.bigquery_loader import load_to_bigquery
+import logging
+
+logger = logging.getLogger("data_accelerator")
 
 
 def load_to_target(
@@ -12,22 +15,10 @@ def load_to_target(
         primary_keys,
         cloud_path
     ):
-    Audit_Columns = {
-        "soft_delete": "__soft_delete",
-        "is_deleted": "__is_deleted",
-        "load_ts": "__load_ts",
-        "insert_ts": "__insert_timestamp",
-        "update_ts": "__update_timestamp",
-        "delete_ts": "__delete_timestamp"
-    }
-
-    # Normalize audit column case to uppercase
-    Audit_Columns = {k: v.upper() for k, v in Audit_Columns.items()}
-
     target_type = target_type.lower()
 
     if target_type == "snowflake":
-        print("Loading to Snowflake...")
+        logger.info("Loading to Snowflake...")
         load_to_snowflake(
             cfg,
             database,
@@ -37,7 +28,7 @@ def load_to_target(
         )
 
     elif target_type == "databricks":
-        print("Loading to Databricks...")
+        logger.info("Loading to Databricks...")
         load_to_databricks(
             cfg,
             database,
@@ -47,7 +38,7 @@ def load_to_target(
             cloud_path
         )
     elif target_type == "bigquery":
-        print("Loading to BigQuery...")
+        logger.info("Loading to BigQuery...")
         load_to_bigquery(
             cfg,
             database,
