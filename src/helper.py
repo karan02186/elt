@@ -46,7 +46,7 @@ def _cloud_location_path_generate(cfg: dict, cloud_type: str, database: str, sch
         elif cloud_type == "azure":
 
             container = cfg["azure"]["azure_container_name"]
-            account = cfg["azure"]["azure_storage_account_key"]
+            account = cfg["azure"]["azure_storage_account_name"]
 
             cloud_location = (
                 f"abfss://{container}@{account}.dfs.core.windows.net/"

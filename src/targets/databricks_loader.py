@@ -3,7 +3,7 @@ import logging
 import configparser
 import os
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("data_accelerator")
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 def read_config():
@@ -34,35 +34,31 @@ def write_sql_to_file(script_dir,database, schema, table, copy_sql, merge_sql):
     print(f"SQL file generated: {file_name}")
 
 def get_connection(cfg):
-    # cfg = parse_config(config_path, configfile=configfile, target_type="databricks")
-    print(f'{cfg} in connection')
-
     try:
         conn = sql.connect(
             server_hostname=cfg["databricks"]["server_hostname"],
             http_path=cfg["databricks"]["http_path"],
             access_token=cfg["databricks"]["access_token"]
         )
-
+        logger.info("Databricks SQL connection established.")
         return conn
 
     except Exception as e:
         logger.error(f"Error connecting to Databricks: {e}")
-        return None
+        raise
 
 def build_stage_path(bucket_path, database, schema, table):
-    return f"{bucket_path}/data/{database.lower()}/{schema.lower()}/{table.lower()}/incremental/"
+    return f"{bucket_path}/data/{database}/{schema}/{table}/incremental/"
 
 
 def generate_copy(database, schema, table, s3_path):
-
-    bronze = f"{database}.bronze.{table}"
+    raw_table = f"{database}_raw.{schema}.{table}"
 
     copy_sql = f"""
-    COPY INTO {bronze}
+    COPY INTO {raw_table}
     FROM (
         SELECT
-            * EXCEPT (row_hash),
+            * EXCEPT (hash_val),
             current_timestamp() AS load_ts
         FROM '{s3_path}'
     )
@@ -73,12 +69,12 @@ def generate_copy(database, schema, table, s3_path):
 
     return copy_sql
 
-def generate_merge(database, table, primary_keys, columns):
+def generate_merge(database, schema, table, primary_keys, columns):
     if isinstance(primary_keys, str):
         primary_keys = [primary_keys]
 
-    bronze = f"{database}.bronze.{table}"
-    silver = f"{database}.silver.{table}"
+    raw_table = f"{database}_raw.{schema}.{table}"
+    tgt_table = f"{database}_tgt.{schema}.{table}"
 
     update_cols = [c for c in columns if c not in primary_keys]
 
@@ -92,7 +88,7 @@ def generate_merge(database, table, primary_keys, columns):
     partition_by = ", ".join(primary_keys)
 
     merge_sql = f"""
-    MERGE INTO {silver} t
+    MERGE INTO {tgt_table} t
     USING (
         SELECT *
         FROM (
@@ -101,7 +97,7 @@ def generate_merge(database, table, primary_keys, columns):
                        PARTITION BY {partition_by}
                        ORDER BY load_ts DESC
                    ) rn
-            FROM {bronze}
+            FROM {raw_table}
         ) x
         WHERE rn = 1
     ) r
@@ -128,8 +124,6 @@ def generate_merge(database, table, primary_keys, columns):
     return merge_sql
 
 def load_to_databricks(cfg, database, schema, table, primary_keys, s3_path):
-    print(cfg)
-
     conn =  get_connection(cfg)
     if isinstance(primary_keys, str):
         primary_keys = [primary_keys]
@@ -139,27 +133,47 @@ def load_to_databricks(cfg, database, schema, table, primary_keys, s3_path):
     bucket_path = s3_path
     # COPY
     copy_sql = generate_copy(database, schema, table, bucket_path)
-    print(copy_sql)
-    print("Running COPY INTO...")
+    logger.info(f"[Databricks] Running COPY INTO for {database}.{schema}.{table}")
     cursor.execute(copy_sql)
 
+    # Ensure copy loaded data before merge.
+    # COPY INTO returns metrics/result set in Databricks SQL.
+    try:
+        copy_rows = cursor.fetchall()
+    except Exception:
+        copy_rows = []
+    loaded_rows = 0
+    for row in copy_rows:
+        row_text = " ".join([str(x) for x in row]).lower()
+        if "num_inserted_rows" in row_text or "rows_copied" in row_text:
+            for val in row:
+                if isinstance(val, int):
+                    loaded_rows += val
+
+    if loaded_rows == 0:
+        logger.warning(
+            f"[Databricks] COPY returned 0 loaded rows for {database}.{schema}.{table}. "
+            "Skipping MERGE."
+        )
+        cursor.close()
+        conn.close()
+        return
+
     # Get columns from bronze
-    cursor.execute(f"DESCRIBE {database}.bronze.{table}")
+    cursor.execute(f"DESCRIBE {database}_raw.{schema}.{table}")
     cols = [row[0] for row in cursor.fetchall()]
-    cols = [c for c in cols if c not in ['soft_delete','load_ts']]
+    cols = [c for c in cols if c not in ['soft_delete','load_ts', 'hash_val']]
 
     # MERGE
-    merge_sql = generate_merge(database, table, primary_keys, cols)
-    print(merge_sql)
-    print("Running MERGE...")
+    merge_sql = generate_merge(database, schema, table, primary_keys, cols)
+    logger.info(f"[Databricks] Running MERGE for {database}.{schema}.{table}")
     # write_sql_to_file(script_dir,database, schema, table, copy_sql, merge_sql)
     cursor.execute(merge_sql)
 
     conn.commit()
     cursor.close()
     conn.close()
-
-    print("Databricks Load Completed")
+    logger.info(f"[Databricks] Load completed for {database}.{schema}.{table}")
 
 
 

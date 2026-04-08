@@ -387,7 +387,7 @@ def query_execution(spark: SparkSession, src_db_type: str, query: str, config_pa
         ValueError: If the source database name is not supported.
         Exception: If any error occurs during the execution of the query.
     """
-    print('query execution started')
+    logger.info("query_execution started")
     try:
         # Parse the configuration file to get database connection parameters
 
@@ -400,7 +400,7 @@ def query_execution(spark: SparkSession, src_db_type: str, query: str, config_pa
             sql_server_password = parsed_config[src_db_type.lower()]['password']
             sql_server_database = parsed_config[src_db_type.lower()]['database_name']
 
-            print('SQL Server query execution started')
+            logger.info("SQL Server query execution started")
 
             base_jdbc_url = f"jdbc:sqlserver://{sql_server_name}:1433;databaseName={sql_server_database}"
 
@@ -411,9 +411,10 @@ def query_execution(spark: SparkSession, src_db_type: str, query: str, config_pa
                     "user": sql_server_user,
                     "password": sql_server_password,
                     "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+                    "longStringLength": "2147483647",
                 }
 
-                print("Attempting secure (TLS) connection...")
+                logger.info("Attempting secure TLS connection for SQL Server JDBC.")
                 result = spark.read \
                     .format("jdbc") \
                     .options(**sql_server_options) \
@@ -423,7 +424,10 @@ def query_execution(spark: SparkSession, src_db_type: str, query: str, config_pa
             except Exception as e:
                 error_msg = str(e)
                 if "TLS10" in error_msg or "SSLHandshakeException" in error_msg:
-                    print("⚠️ Secure connection failed due to TLS version mismatch. Retrying with encrypt=false...")
+                    logger.warning(
+                        "Secure JDBC connection failed due to TLS mismatch. "
+                        "Retrying with encrypt=false based on fallback policy."
+                    )
                     sql_server_options["url"] = f"{base_jdbc_url};encrypt=false;trustServerCertificate=true;"
                     result = spark.read \
                         .format("jdbc") \
@@ -434,7 +438,7 @@ def query_execution(spark: SparkSession, src_db_type: str, query: str, config_pa
                     # Raise other exceptions normally
                     raise
 
-            print("✅ SQL Server connection successful.")
+            logger.info("SQL Server query executed successfully.")
 
 
 
