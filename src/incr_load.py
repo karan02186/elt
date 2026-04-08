@@ -38,6 +38,15 @@ logger = logging.getLogger("data_accelerator")
 project_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
+def _get_source_columns(spark, src_db_type: str, schema: str, table: str, config_path: str, configfile: str):
+    """
+    Returns source column names for a table by issuing a zero-row query.
+    """
+    probe_query = f"SELECT TOP 0 * FROM {schema}.{table}"
+    df = query_execution(spark, src_db_type, probe_query, config_path, configfile)
+    return df.columns
+
+
 # =============================================================================
 # FUNCTION : incremental_load_src_to_cloud
 # =============================================================================
@@ -174,7 +183,16 @@ def incremental_load_src_to_cloud(
     # -------------------------------------------------------------------------
     # Step 7: Iterate over each table in the metadata and run the load
     # -------------------------------------------------------------------------
-    for row in meta_df.collect():
+    required_meta_cols = {
+        "SRC_TBL_NAME", "DATABASE_NAME", "SCHEMA_NAME", "PRIMARY_KEY_COL", "INCR_LOGIC_COL_NAME"
+    }
+    missing_meta_cols = required_meta_cols.difference(set(meta_df.columns))
+    if missing_meta_cols:
+        raise ValueError(
+            f"Metadata CSV missing required columns: {sorted(missing_meta_cols)}"
+        )
+
+    for row in meta_df.toLocalIterator():
         meta     = row.asDict()
         table    = meta["SRC_TBL_NAME"]
         database = meta["DATABASE_NAME"]
@@ -185,12 +203,41 @@ def incremental_load_src_to_cloud(
         pk = [col.strip() for col in meta["PRIMARY_KEY_COL"].split(",")]
         pk_str = ", ".join(pk)
 
-        # Determine load type — SNAPSHOT if no incremental column is defined
-        load_type = (
-            "SNAPSHOT"
-            if not incr_cols or str(incr_cols).strip().lower() in ("none", "null", "")
-            else "TIMESTAMP"
-        )
+        if not meta.get("PRIMARY_KEY_COL"):
+            logger.error(f"Skipping '{table}' due to missing PRIMARY_KEY_COL in metadata.")
+            continue
+
+        # Determine load type:
+        # 1) If INCR_LOGIC_COL_NAME is empty => SNAPSHOT
+        # 2) If provided, validate columns exist in source:
+        #       if all exist => TIMESTAMP, else => SNAPSHOT
+        if not incr_cols or str(incr_cols).strip().lower() in ("none", "null", ""):
+            load_type = "SNAPSHOT"
+        else:
+            try:
+                source_cols = _get_source_columns(
+                    spark=spark,
+                    src_db_type=src_db_type,
+                    schema=schema,
+                    table=table,
+                    config_path=config_path,
+                    configfile=configfile
+                )
+                source_col_set = set(source_cols)
+                incr_col_list = [c.strip() for c in str(incr_cols).replace('"', "").split(",") if c.strip()]
+                has_all_cols = all(c in source_col_set for c in incr_col_list)
+                load_type = "TIMESTAMP" if has_all_cols else "SNAPSHOT"
+                if not has_all_cols:
+                    logger.warning(
+                        f"Table '{table}' missing one or more timestamp columns {incr_col_list}. "
+                        "Falling back to SNAPSHOT mode."
+                    )
+            except Exception as err:
+                logger.warning(
+                    f"Could not validate timestamp columns for '{table}': {err}. "
+                    "Falling back to SNAPSHOT mode."
+                )
+                load_type = "SNAPSHOT"
 
         logger.info(f"Processing table='{table}' | load_type='{load_type}'")
 
@@ -257,7 +304,7 @@ def incremental_load_src_to_cloud(
                     run_id=run_id,
                     cloud_type=cloud_type,
                     target_type=target_type,
-                    buckets=1   # Number of hash buckets for snapshot comparison — configurable
+                    buckets=int(cfg.get("snapshot_default_buckets", 1))
                 )
 
             total_records += rows or 0

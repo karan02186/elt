@@ -22,7 +22,9 @@ from pyspark.sql.functions import (
     collect_list,
     sort_array,
     lit,
-    sum as spark_sum
+    sum as spark_sum,
+    current_timestamp,
+    when
 )
 
 from elt.src.control_table import update_pipeline_run_end
@@ -239,7 +241,7 @@ def extraction_incremental(
 # =============================================================================
 def add_row_hash(df, pk):
     """
-    Adds a 'row_hash' column to the DataFrame by computing an MD5 hash of
+    Adds a 'hash_val' column to the DataFrame by computing an MD5 hash of
     all non-PK columns. Used for batch hash comparison in snapshot CDC.
 
     Params:
@@ -247,7 +249,7 @@ def add_row_hash(df, pk):
         pk  (str)      : Primary key column name to exclude from hashing.
 
     Returns:
-        DataFrame: DataFrame with an additional 'row_hash' column.
+        DataFrame: DataFrame with an additional 'hash_val' column.
     """
     pk_lower = [c.lower() for c in pk]
 
@@ -257,7 +259,7 @@ def add_row_hash(df, pk):
     ]
 
     return df.withColumn(
-        "row_hash",
+        "hash_val",
         md5(concat_ws("||", *non_pk_cols))
     )
 
@@ -268,17 +270,17 @@ def add_row_hash(df, pk):
 def compute_batch_hash(df) -> int:
     """
     Computes a single integer hash for an entire batch by summing hashed
-    row_hash values. Used to detect whether a batch has changed since
+    hash_val values. Used to detect whether a batch has changed since
     the last snapshot.
 
     Params:
-        df (DataFrame): DataFrame containing a 'row_hash' column.
+        df (DataFrame): DataFrame containing a 'hash_val' column.
 
     Returns:
         int: Aggregated batch hash value. Returns 0 if DataFrame is empty.
     """
     result = (
-        df.selectExpr("hash(row_hash) as h")
+        df.selectExpr("hash(hash_val) as h")
           .agg(spark_sum("h").alias("batch_hash"))
           .collect()[0]["batch_hash"]
     )
@@ -391,6 +393,23 @@ database,
         f"[{table}] Starting Snapshot Batch CDC | cloud='{cloud_type}' | buckets={buckets}"
     )
 
+    # Auto-scale buckets for larger tables when caller passes default bucket=1
+    try:
+        if buckets <= 1:
+            size_query = f"SELECT COUNT(1) AS row_cnt FROM {schema}.{table}"
+            row_cnt_df = query_execution(
+                spark, "sqlserver", size_query, cfg["config_path"], cfg["configfile"]
+            )
+            row_cnt = int(row_cnt_df.collect()[0]["row_cnt"])
+            rows_per_bucket = int(cfg.get("snapshot_rows_per_bucket", 1_000_000))
+            buckets = max(1, min(64, (row_cnt + rows_per_bucket - 1) // rows_per_bucket))
+            logger.info(
+                f"[{table}] Auto bucket sizing | row_cnt={row_cnt} | "
+                f"rows_per_bucket={rows_per_bucket} | buckets={buckets}"
+            )
+    except Exception as bucket_err:
+        logger.warning(f"[{table}] Auto bucket sizing skipped: {bucket_err}. Using buckets={buckets}")
+
     # -------------------------------------------------------------------------
     # Resolve base cloud storage path
     # -------------------------------------------------------------------------
@@ -487,8 +506,8 @@ database,
             final_snapshot_df = delta_df
 
         else:
-            today_hash_df = today_df.select(*pk, "row_hash")
-            prev_hash_df  = prev_active_df.select(*pk, "row_hash")
+            today_hash_df = today_df.select(*pk, "hash_val")
+            prev_hash_df  = prev_active_df.select(*pk, "hash_val")
 
             # New PKs not in previous snapshot = inserts
             inserted_df = today_hash_df.select(*pk).subtract(prev_hash_df.select(*pk))
@@ -552,6 +571,13 @@ database,
         # -----------------------------------------------------------------------
         # WRITE INCREMENTAL DELTA TO CLOUD
         # -----------------------------------------------------------------------
+        delta_df = (
+            delta_df
+            .withColumn("load_ts", current_timestamp())
+            .withColumn("insert_ts", when(delta_df["soft_delete"] == 0, current_timestamp()).otherwise(lit(None).cast("timestamp")))
+            .withColumn("update_ts", when(delta_df["soft_delete"] == 0, current_timestamp()).otherwise(lit(None).cast("timestamp")))
+            .withColumn("delete_ts", when(delta_df["soft_delete"] == 1, current_timestamp()).otherwise(lit(None).cast("timestamp")))
+        )
         delta_count = delta_df.count()
 
         if delta_count > 0:
@@ -709,7 +735,15 @@ database,
             last_run_ts=None,
             error_message=None,
             config_path=cfg["config_path"],
-            configfile=cfg["configfile"]
+            configfile=cfg["configfile"],
+            target_type=target_type,
+            extract_status="SUCCESS",
+            raw_load_status="SUCCESS",
+            merge_status="SUCCESS",
+            rows_extracted=total_delta,
+            rows_written_to_cloud=total_delta,
+            rows_merged=total_delta,
+            rows_deleted=0
         )
         logger.info(f"[{table}] Control table updated | total_delta={total_delta}")
     except Exception as err:

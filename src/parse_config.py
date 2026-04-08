@@ -108,15 +108,14 @@ def parse_config(config_path: str,configfile:str = None, src_db_type: str = None
                     key: config.get(cloud_type_upper, key, fallback=None) for key in cloud_sections[cloud_type_upper]
                 }
                 logger.info(f"after cloud is {parsed_config}")
-        print(parsed_config)
         logger.info(f"at end is {parsed_config}")
         return parsed_config
 
     except (FileNotFoundError, KeyError, ValueError) as err:
-        print(f"Configuration error: {err}")
+        logger.exception(f"Configuration error: {err}")
         raise Exception(f"Error parsing the configuration file: {err}")
     except Exception as e:
-        print(f"An unexpected error occurred while parsing the config files: {e}")
+        logger.exception(f"An unexpected error occurred while parsing the config files: {e}")
         raise Exception(f"An unexpected error occurred while parsing the config files: {e}")
 
 # cfg = parse_config(
@@ -125,4 +124,3 @@ def parse_config(config_path: str,configfile:str = None, src_db_type: str = None
 #
 # # Pretty print JSON
 # print(json.dumps(cfg, indent=4))
-

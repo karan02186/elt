@@ -9,7 +9,7 @@
 import logging
 from datetime import datetime
 
-from pyspark.sql.functions import lit, max as spark_max
+from pyspark.sql.functions import lit, max as spark_max, current_timestamp, when
 
 from elt.src.connections import query_execution
 from elt.src.control_table import update_pipeline_run_end, get_last_success_run_timestamp
@@ -201,13 +201,22 @@ database,
     # STEP 5: Merge incremental rows and soft-delete rows into final delta
     # =========================================================================
     final_df    = incr_df.unionByName(delete_df) if delete_df is not None else incr_df
+    final_df = (
+        final_df
+        .withColumn("load_ts", current_timestamp())
+        .withColumn("insert_ts", when(final_df["soft_delete"] == 0, current_timestamp()).otherwise(lit(None).cast("timestamp")))
+        .withColumn("update_ts", when(final_df["soft_delete"] == 0, current_timestamp()).otherwise(lit(None).cast("timestamp")))
+        .withColumn("delete_ts", when(final_df["soft_delete"] == 1, current_timestamp()).otherwise(lit(None).cast("timestamp")))
+    )
     final_count = final_df.count()
 
     if final_count == 0:
         logger.info(f"[{table}] No changes detected. Updating control table and exiting.")
         update_pipeline_run_end(
             run_id, "SUCCESS", 0, last_ts, None,
-            config_path, configfile, target_type=target_type
+            config_path, configfile, target_type=target_type,
+            extract_status="SUCCESS", raw_load_status="SUCCESS", merge_status="SUCCESS",
+            rows_extracted=0, rows_written_to_cloud=0, rows_merged=0, rows_deleted=0
         )
         return 0
 
@@ -374,7 +383,10 @@ database,
     try:
         update_pipeline_run_end(
             run_id, "SUCCESS", final_count, max_ts, None,
-            config_path, configfile, target_type=target_type
+            config_path, configfile, target_type=target_type,
+            extract_status="SUCCESS", raw_load_status="SUCCESS", merge_status="SUCCESS",
+            rows_extracted=incr_count, rows_written_to_cloud=final_count, rows_merged=final_count,
+            rows_deleted=0
         )
         logger.info(
             f"[{table}] Control table updated | rows={final_count} | max_ts='{max_ts}'"

@@ -120,7 +120,7 @@ COPY INTO {full_table}
 FROM @{stage_path}
 FILE_FORMAT = (TYPE = PARQUET)
 PATTERN = '.*[.]parquet'
-MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+MATCH_BY_COLUMN_NAME = CASE_SENSITIVE
 FORCE = TRUE;
 """
     return copy_sql
@@ -316,11 +316,11 @@ def load_to_snowflake(cfg, db, schema, tbl, pk):
     print(f"Loading: {db}.{schema}.{tbl} | pk={pk}")
     Audit_cols = {
         "soft_delete": "soft_delete",
-        "is_deleted": "soft_delete",
-        "load_ts": "__load_ts",
-        "insert_ts": "__insert_timestamp",
-        "update_ts": "__update_timestamp",
-        "delete_ts": "__delete_timestamp"
+        "is_deleted": "is_deleted",
+        "load_ts": "load_ts",
+        "insert_ts": "insert_ts",
+        "update_ts": "update_ts",
+        "delete_ts": "delete_ts"
     }
     if isinstance(pk, str):
         pk = [pk]
@@ -466,7 +466,7 @@ def load_to_snowflake(cfg, db, schema, tbl, pk):
 # FROM {stage_path}
 # FILE_FORMAT = (TYPE = PARQUET)
 # PATTERN = '.*[.]parquet'
-# MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+# MATCH_BY_COLUMN_NAME = CASE_SENSITIVE
 # ON_ERROR = 'SKIP_FILE'
 # FORCE = FALSE;
 #     """

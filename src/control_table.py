@@ -509,7 +509,10 @@ def create_pipeline_run_control_table(
                         SourceTable STRING, LoadType STRING, Status STRING,
                         StartTime TIMESTAMP, EndTime TIMESTAMP, DurationSeconds INT64,
                         RowsProcessed INT64, LastRunTimestamp TIMESTAMP,
-                        Cloud STRING, CloudLocation STRING, ErrorMessage STRING
+                        Cloud STRING, CloudLocation STRING, ErrorMessage STRING,
+                        ExtractStatus STRING, RawLoadStatus STRING, MergeStatus STRING,
+                        TableRunStatus STRING, PipelineRunStatus STRING,
+                        RowsExtracted INT64, RowsWrittenToCloud INT64, RowsMerged INT64, RowsDeleted INT64
                     )
                 """
                 conn.query(create_sql).result()
@@ -533,7 +536,10 @@ def create_pipeline_run_control_table(
                         SourceTable VARCHAR(100), LoadType VARCHAR(30), Status VARCHAR(30),
                         StartTime TIMESTAMP_NTZ, EndTime TIMESTAMP_NTZ, DurationSeconds INT,
                         RowsProcessed BIGINT, LastRunTimestamp TIMESTAMP_NTZ,
-                        Cloud VARCHAR(50), CloudLocation VARCHAR(500), ErrorMessage VARCHAR
+                        Cloud VARCHAR(50), CloudLocation VARCHAR(500), ErrorMessage VARCHAR,
+                        ExtractStatus VARCHAR(30), RawLoadStatus VARCHAR(30), MergeStatus VARCHAR(30),
+                        TableRunStatus VARCHAR(30), PipelineRunStatus VARCHAR(30),
+                        RowsExtracted BIGINT, RowsWrittenToCloud BIGINT, RowsMerged BIGINT, RowsDeleted BIGINT
                     )
                 """)
 
@@ -549,7 +555,10 @@ def create_pipeline_run_control_table(
                         SourceTable STRING, LoadType STRING, Status STRING,
                         StartTime TIMESTAMP, EndTime TIMESTAMP, DurationSeconds INT,
                         RowsProcessed BIGINT, LastRunTimestamp TIMESTAMP,
-                        Cloud STRING, CloudLocation STRING, ErrorMessage STRING
+                        Cloud STRING, CloudLocation STRING, ErrorMessage STRING,
+                        ExtractStatus STRING, RawLoadStatus STRING, MergeStatus STRING,
+                        TableRunStatus STRING, PipelineRunStatus STRING,
+                        RowsExtracted BIGINT, RowsWrittenToCloud BIGINT, RowsMerged BIGINT, RowsDeleted BIGINT
                     )
                 """)
 
@@ -632,7 +641,10 @@ def insert_pipeline_run_start(
                         '{PipelineRunId}', '{pipeline_id}', {name_val},
                         '{source_type}', '{database}', '{schema}', '{table}', '{load_type}',
                         'STARTED', CURRENT_TIMESTAMP(), NULL, NULL, NULL, NULL,
-                        '{cloud}', '{cloud_location}', NULL
+                        '{cloud}', '{cloud_location}', NULL,
+                        'STARTED', 'STARTED', 'STARTED',
+                        'STARTED', 'RUNNING',
+                        0, 0, 0, 0
                     FROM `{trg_database}.{trg_schema}.PipelineRunControl`
                 """
                 conn.query(insert_sql).result()
@@ -655,11 +667,15 @@ def insert_pipeline_run_start(
             insert_sql = f"""
                 INSERT INTO {trg_database}.{trg_schema}.PipelineRunControl (
                     PipelineRunId, PipelineId, PipelineName, SourceType, SourceDatabase,
-                    SourceSchema, SourceTable, LoadType, Status, StartTime, Cloud, CloudLocation
+                    SourceSchema, SourceTable, LoadType, Status, StartTime, Cloud, CloudLocation,
+                    ExtractStatus, RawLoadStatus, MergeStatus, TableRunStatus, PipelineRunStatus,
+                    RowsExtracted, RowsWrittenToCloud, RowsMerged, RowsDeleted
                 ) VALUES (
                     '{PipelineRunId}', '{pipeline_id}', {name_val},
                     '{source_type}', '{database}', '{schema}', '{table}', '{load_type}',
-                    'STARTED', CURRENT_TIMESTAMP(), '{cloud}', '{cloud_location}'
+                    'STARTED', CURRENT_TIMESTAMP(), '{cloud}', '{cloud_location}',
+                    'STARTED', 'STARTED', 'STARTED', 'STARTED', 'RUNNING',
+                    0, 0, 0, 0
                 )
             """
             cur.execute(insert_sql)
@@ -700,7 +716,14 @@ def update_pipeline_run_end(
     error_message,
     config_path: str,
     configfile: str,
-    target_type: str = None
+    target_type: str = None,
+    extract_status: str = None,
+    raw_load_status: str = None,
+    merge_status: str = None,
+    rows_extracted: int = None,
+    rows_written_to_cloud: int = None,
+    rows_merged: int = None,
+    rows_deleted: int = None
 ) -> None:
 
     target_type = target_type or get_target_type(config_path, configfile)
@@ -713,6 +736,9 @@ def update_pipeline_run_end(
 
         error_sql = f"'{str(error_message).replace(chr(39), chr(39)*2)}'" if error_message else "NULL"
         ts_sql    = f"'{last_run_ts}'" if last_run_ts else "NULL"
+        extract_sql = f"'{extract_status}'" if extract_status else "NULL"
+        raw_sql = f"'{raw_load_status}'" if raw_load_status else "NULL"
+        merge_sql = f"'{merge_status}'" if merge_status else "NULL"
 
         # ===== BIGQUERY =====
         if target_type.lower() == "bigquery":
@@ -723,30 +749,101 @@ def update_pipeline_run_end(
                     DurationSeconds = TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), StartTime, SECOND),
                     RowsProcessed = {rows_processed if rows_processed else 0},
                     LastRunTimestamp = {ts_sql},
-                    ErrorMessage = {error_sql}
+                    ErrorMessage = {error_sql},
+                    ExtractStatus = {extract_sql},
+                    RawLoadStatus = {raw_sql},
+                    MergeStatus = {merge_sql},
+                    TableRunStatus = '{status}',
+                    RowsExtracted = {rows_extracted if rows_extracted is not None else rows_processed if rows_processed else 0},
+                    RowsWrittenToCloud = {rows_written_to_cloud if rows_written_to_cloud is not None else rows_processed if rows_processed else 0},
+                    RowsMerged = {rows_merged if rows_merged is not None else rows_processed if rows_processed else 0},
+                    RowsDeleted = {rows_deleted if rows_deleted is not None else 0}
                 WHERE RunId = {run_id}
             """
             conn.query(update_sql).result()
+            _update_pipeline_aggregate_status_bigquery(conn, trg_database, trg_schema, run_id)
             logger.info(f"[BigQuery] PipelineRunControl updated | RunId={run_id}")
             return
 
         # ===== SNOWFLAKE / DATABRICKS =====
         cur = conn.cursor()
+        if target_type.lower() == "snowflake":
+            duration_expr = "DATEDIFF('SECOND', StartTime, CURRENT_TIMESTAMP())"
+        else:
+            duration_expr = "TIMESTAMPDIFF(SECOND, StartTime, CURRENT_TIMESTAMP())"
         cur.execute(f"""
             UPDATE {trg_database}.{trg_schema}.PipelineRunControl
-            SET Status           = '{status}',
-                EndTime          = CURRENT_TIMESTAMP(),
-                DurationSeconds  = DATEDIFF(SECOND, StartTime, CURRENT_TIMESTAMP()),
-                RowsProcessed    = {rows_processed if rows_processed else 0},
-                LastRunTimestamp = {ts_sql},
-                ErrorMessage     = {error_sql}
+            SET Status              = '{status}',
+                EndTime             = CURRENT_TIMESTAMP(),
+                DurationSeconds     = {duration_expr},
+                RowsProcessed       = {rows_processed if rows_processed else 0},
+                LastRunTimestamp    = {ts_sql},
+                ErrorMessage        = {error_sql},
+                ExtractStatus       = {extract_sql},
+                RawLoadStatus       = {raw_sql},
+                MergeStatus         = {merge_sql},
+                TableRunStatus      = '{status}',
+                RowsExtracted       = {rows_extracted if rows_extracted is not None else rows_processed if rows_processed else 0},
+                RowsWrittenToCloud  = {rows_written_to_cloud if rows_written_to_cloud is not None else rows_processed if rows_processed else 0},
+                RowsMerged          = {rows_merged if rows_merged is not None else rows_processed if rows_processed else 0},
+                RowsDeleted         = {rows_deleted if rows_deleted is not None else 0}
             WHERE RunId = {run_id}
         """)
+        _update_pipeline_aggregate_status(cur, trg_database, trg_schema, run_id)
         cur.close()
 
     finally:
         if target_type.lower() != "bigquery":
             conn.close()
+
+
+def _update_pipeline_aggregate_status(cur, trg_database: str, trg_schema: str, run_id: int) -> None:
+    cur.execute(
+        f"SELECT PipelineRunId FROM {trg_database}.{trg_schema}.PipelineRunControl WHERE RunId = {run_id}"
+    )
+    row = cur.fetchone()
+    if not row:
+        return
+    pipeline_run_id = row[0]
+    cur.execute(f"""
+        UPDATE {trg_database}.{trg_schema}.PipelineRunControl
+        SET PipelineRunStatus = CASE
+            WHEN EXISTS (
+                SELECT 1 FROM {trg_database}.{trg_schema}.PipelineRunControl
+                WHERE PipelineRunId = '{pipeline_run_id}' AND TableRunStatus <> 'SUCCESS'
+            ) THEN 'FAILED'
+            ELSE 'SUCCESS'
+        END
+        WHERE PipelineRunId = '{pipeline_run_id}'
+    """)
+
+
+def _update_pipeline_aggregate_status_bigquery(conn, trg_database: str, trg_schema: str, run_id: int) -> None:
+    pipeline_sql = f"""
+        SELECT PipelineRunId
+        FROM `{trg_database}.{trg_schema}.PipelineRunControl`
+        WHERE RunId = {run_id}
+        LIMIT 1
+    """
+    rows = list(conn.query(pipeline_sql).result())
+    if not rows:
+        return
+    pipeline_run_id = rows[0][0]
+    update_sql = f"""
+        UPDATE `{trg_database}.{trg_schema}.PipelineRunControl`
+        SET PipelineRunStatus = (
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM `{trg_database}.{trg_schema}.PipelineRunControl`
+                    WHERE PipelineRunId = '{pipeline_run_id}' AND TableRunStatus <> 'SUCCESS'
+                ) THEN 'FAILED'
+                ELSE 'SUCCESS'
+            END
+        )
+        WHERE PipelineRunId = '{pipeline_run_id}'
+    """
+    conn.query(update_sql).result()
             
 # =============================================================================
 # FUNCTION : get_last_success_run_timestamp
