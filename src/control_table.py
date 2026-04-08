@@ -100,21 +100,23 @@ def _get_target_db_schema(
         if target_type == 'snowflake':
             database = parsed_config['snowflake']['database']
             trg_database = f'{database}_tgt'
-            trg_schema   = parsed_config['snowflake']['schema']
+            trg_schema   = "CONTROL_SCHEMA"
             stg_database = parsed_config['snowflake'].get('stg_database', trg_database)
-            stg_schema   = parsed_config['snowflake'].get('stg_schema', trg_schema)
+            stg_schema   = parsed_config['snowflake'].get('stg_schema', "CONTROL_SCHEMA")
             return trg_database, trg_schema, stg_database, stg_schema
 
         elif target_type == 'databricks':
-            trg_database = parsed_config['databricks']['database']
-            trg_schema   = parsed_config['databricks']['schema']
+            base_database = parsed_config['databricks']['database']
+            trg_database = f"{base_database}_tgt"
+            trg_schema   = "CONTROL_SCHEMA"
             if not trg_database:
                 raise ValueError("Databricks 'database' (catalog) key must be specified in config.")
             return trg_database, trg_schema, trg_database, trg_schema
 
         elif target_type == 'bigquery':
             trg_database = parsed_config['bigquery']['project']
-            trg_schema   = parsed_config['bigquery'].get('dataset', 'default_dataset')
+            base_dataset = parsed_config['bigquery'].get('dataset', 'default_dataset')
+            trg_schema   = f"{base_dataset}_tgt"
             return trg_database, trg_schema, trg_database, trg_schema
 
         else:
@@ -544,8 +546,7 @@ def create_pipeline_run_control_table(
                 """)
 
             elif target_type.lower() == "databricks":
-                # Use existing catalog — schema creation only
-                logger.info(f"Using existing Databricks catalog: '{trg_database}'")
+                cur.execute(f"CREATE CATALOG IF NOT EXISTS {trg_database}")
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {trg_database}.{trg_schema}")
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {trg_database}.{trg_schema}.PipelineRunControl (

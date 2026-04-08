@@ -52,11 +52,10 @@ def build_stage_path(bucket_path, database, schema, table):
 
 
 def generate_copy(database, schema, table, s3_path):
-
-    bronze = f"{database}.bronze.{table}"
+    raw_table = f"{database}_raw.{schema}.{table}"
 
     copy_sql = f"""
-    COPY INTO {bronze}
+    COPY INTO {raw_table}
     FROM (
         SELECT
             * EXCEPT (hash_val),
@@ -70,12 +69,12 @@ def generate_copy(database, schema, table, s3_path):
 
     return copy_sql
 
-def generate_merge(database, table, primary_keys, columns):
+def generate_merge(database, schema, table, primary_keys, columns):
     if isinstance(primary_keys, str):
         primary_keys = [primary_keys]
 
-    bronze = f"{database}.bronze.{table}"
-    silver = f"{database}.silver.{table}"
+    raw_table = f"{database}_raw.{schema}.{table}"
+    tgt_table = f"{database}_tgt.{schema}.{table}"
 
     update_cols = [c for c in columns if c not in primary_keys]
 
@@ -89,7 +88,7 @@ def generate_merge(database, table, primary_keys, columns):
     partition_by = ", ".join(primary_keys)
 
     merge_sql = f"""
-    MERGE INTO {silver} t
+    MERGE INTO {tgt_table} t
     USING (
         SELECT *
         FROM (
@@ -98,7 +97,7 @@ def generate_merge(database, table, primary_keys, columns):
                        PARTITION BY {partition_by}
                        ORDER BY load_ts DESC
                    ) rn
-            FROM {bronze}
+            FROM {raw_table}
         ) x
         WHERE rn = 1
     ) r
@@ -161,12 +160,12 @@ def load_to_databricks(cfg, database, schema, table, primary_keys, s3_path):
         return
 
     # Get columns from bronze
-    cursor.execute(f"DESCRIBE {database}.bronze.{table}")
+    cursor.execute(f"DESCRIBE {database}_raw.{schema}.{table}")
     cols = [row[0] for row in cursor.fetchall()]
     cols = [c for c in cols if c not in ['soft_delete','load_ts', 'hash_val']]
 
     # MERGE
-    merge_sql = generate_merge(database, table, primary_keys, cols)
+    merge_sql = generate_merge(database, schema, table, primary_keys, cols)
     logger.info(f"[Databricks] Running MERGE for {database}.{schema}.{table}")
     # write_sql_to_file(script_dir,database, schema, table, copy_sql, merge_sql)
     cursor.execute(merge_sql)
